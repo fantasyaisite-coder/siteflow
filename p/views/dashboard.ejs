@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Cookie Injection Proxy</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body class="bg-slate-900 min-h-screen">
+    <!-- Toast notification -->
+    <% if (message) { %>
+        <div id="toast" class="toast bg-slate-800 border border-slate-700 text-white px-6 py-4 rounded-xl shadow-2xl flex items-center gap-3">
+            <span class="text-green-400 text-xl">✓</span>
+            <span><%= message %></span>
+        </div>
+    <% } %>
+
+    <!-- Header -->
+    <header class="bg-slate-800/50 backdrop-blur-md border-b border-slate-700/50 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center gap-3">
+                    <span class="text-2xl">🍪</span>
+                    <h1 class="text-xl font-bold text-white">Cookie Proxy</h1>
+                    <span class="text-xs text-slate-500 bg-slate-700 px-2 py-0.5 rounded-full">Admin</span>
+                </div>
+                <div class="flex items-center gap-4">
+                    <a href="/admin/create?token=<%= token %>"
+                        class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-500 transition-colors">
+                        <span>+</span> New Profile
+                    </a>
+                    <a href="/logout?token=<%= token %>"
+                        class="text-slate-400 hover:text-white transition-colors text-sm">Logout</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div class="flex items-center justify-between mb-8">
+            <div>
+                <h2 class="text-2xl font-bold text-white">Injection Profiles</h2>
+                <p class="text-slate-400 text-sm mt-1"><%= profiles.length %> profile(s) configured</p>
+            </div>
+        </div>
+
+        <% if (profiles.length === 0) { %>
+            <div class="text-center py-20">
+                <div class="text-6xl mb-4 opacity-30">📦</div>
+                <h3 class="text-xl font-semibold text-slate-400 mb-2">No profiles yet</h3>
+                <p class="text-slate-500 mb-6">Create your first injection profile to get started.</p>
+                <a href="/admin/create?token=<%= token %>"
+                    class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 text-white font-medium hover:bg-indigo-500 transition-colors">
+                    <span>+</span> Create Profile
+                </a>
+            </div>
+        <% } else { %>
+            <div class="grid gap-4">
+                <% profiles.forEach(function(p) {
+                    const shareLink = `<%= baseUrl %>/go/${p.id}`;
+                    const domain = new URL(p.targetUrl).hostname;
+                %>
+                    <div class="card bg-slate-800/60 backdrop-blur-sm rounded-xl border border-slate-700/50 p-6 hover:border-indigo-500/30 transition-all">
+                        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-3 mb-2">
+                                    <h3 class="text-lg font-semibold text-white truncate"><%= p.name %></h3>
+                                    <span class="text-xs text-slate-400 bg-slate-700/50 px-2 py-0.5 rounded-full"><%= p.cookies.length %> cookies</span>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                                    <span class="text-slate-400">Target:</span>
+                                    <span class="text-indigo-300 truncate max-w-xs"><%= p.targetUrl %></span>
+                                    <span class="text-slate-600">|</span>
+                                    <span class="text-slate-400">Domain:</span>
+                                    <span class="text-emerald-300"><%= domain %></span>
+                                </div>
+                                <!-- Shareable Link -->
+                                <div class="mt-3 flex items-center gap-2">
+                                    <span class="text-slate-500 text-xs whitespace-nowrap">Share Link:</span>
+                                    <div class="flex-1 flex items-center gap-2 min-w-0">
+                                        <input type="text" readonly value="<%= shareLink %>"
+                                            class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-300 font-mono truncate focus:outline-none">
+                                        <button onclick="copyLink(this)" data-link="<%= shareLink %>"
+                                            class="copy-btn shrink-0 px-3 py-1.5 rounded-lg bg-slate-700 text-slate-300 text-xs hover:bg-slate-600 transition-colors">
+                                            Copy
+                                        </button>
+                                        <a href="<%= shareLink %>" target="_blank"
+                                            class="shrink-0 px-3 py-1.5 rounded-lg bg-indigo-600/20 text-indigo-300 text-xs hover:bg-indigo-600/30 transition-colors">
+                                            Open
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-2 shrink-0">
+                                <button onclick="testProxy('<%= p.id %>')"
+                                    class="px-4 py-2 rounded-lg bg-emerald-600/20 text-emerald-300 text-sm hover:bg-emerald-600/30 transition-colors whitespace-nowrap">
+                                    Test Proxy
+                                </button>
+                                <a href="/admin/edit/<%= p.id %>?token=<%= token %>"
+                                    class="px-4 py-2 rounded-lg bg-slate-700 text-slate-300 text-sm hover:bg-slate-600 transition-colors whitespace-nowrap">
+                                    Edit
+                                </a>
+                                <form method="POST" action="/admin/delete/<%= p.id %>" class="inline" onsubmit="return confirm('Delete this profile?')">
+                                    <input type="hidden" name="token" value="<%= token %>">
+                                    <button type="submit"
+                                        class="px-4 py-2 rounded-lg bg-red-600/20 text-red-300 text-sm hover:bg-red-600/30 transition-colors whitespace-nowrap">
+                                        Delete
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+
+                        <!-- Cookie preview -->
+                        <% if (p.cookies.length > 0) { %>
+                            <div class="mt-4 pt-4 border-t border-slate-700/50">
+                                <div class="flex flex-wrap gap-1.5">
+                                    <% p.cookies.forEach(function(c) {
+                                        const isSecure = c.secure || c.name.startsWith('__Secure-') || c.name.startsWith('__Host-');
+                                        const isHost = c.name.startsWith('__Host-');
+                                    %>
+                                        <span class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono
+                                            <%= isHost ? 'badge-host' : (isSecure ? 'badge-secure' : 'bg-slate-700/50 text-slate-300') %>">
+                                            <%= c.name %>=<%= c.value ? c.value.substring(0,15) + (c.value.length > 15 ? '...' : '') : '' %>
+                                        </span>
+                                    <% }); %>
+                                </div>
+                            </div>
+                        <% } %>
+                    </div>
+                <% }); %>
+            </div>
+        <% } %>
+    </main>
+
+    <!-- Test result modal -->
+    <div id="testModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div class="bg-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700 max-w-sm w-full mx-4">
+            <div id="testResult" class="text-center">
+                <div class="spinner mx-auto mb-4"></div>
+                <p class="text-slate-300" id="testMessage">Testing connection...</p>
+            </div>
+            <button onclick="closeTestModal()" class="mt-4 w-full py-2 rounded-lg bg-slate-700 text-slate-300 text-sm hover:bg-slate-600 transition-colors">
+                Close
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Dismiss toast
+        setTimeout(() => { const t = document.getElementById('toast'); if(t) t.remove(); }, 3500);
+
+        // Copy link
+        function copyLink(btn) {
+            const link = btn.getAttribute('data-link');
+            navigator.clipboard.writeText(link).then(() => {
+                const orig = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.classList.add('text-green-400');
+                setTimeout(() => { btn.textContent = orig; btn.classList.remove('text-green-400'); }, 2000);
+            });
+        }
+
+        // Test proxy
+        function testProxy(id) {
+            const modal = document.getElementById('testModal');
+            const result = document.getElementById('testResult');
+            const msg = document.getElementById('testMessage');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            result.innerHTML = `<div class="spinner mx-auto mb-4"></div><p class="text-slate-300">Testing connection...</p>`;
+
+            fetch('/admin/test/' + id, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: '<%= token %>' })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    result.innerHTML = `
+                        <div class="text-4xl mb-3">✅</div>
+                        <p class="text-emerald-400 font-semibold">Target Reachable!</p>
+                        <p class="text-slate-400 text-sm mt-1">Status: ${data.statusCode}</p>
+                    `;
+                } else {
+                    result.innerHTML = `
+                        <div class="text-4xl mb-3">❌</div>
+                        <p class="text-red-400 font-semibold">Connection Failed</p>
+                        <p class="text-slate-400 text-sm mt-1">${data.error}</p>
+                    `;
+                }
+            })
+            .catch(e => {
+                result.innerHTML = `
+                    <div class="text-4xl mb-3">❌</div>
+                    <p class="text-red-400 font-semibold">Error</p>
+                    <p class="text-slate-400 text-sm mt-1">${e.message}</p>
+                `;
+            });
+        }
+
+        function closeTestModal() {
+            document.getElementById('testModal').classList.add('hidden');
+            document.getElementById('testModal').classList.remove('flex');
+        }
+    </script>
+</body>
+</html>
