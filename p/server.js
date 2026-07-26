@@ -137,32 +137,39 @@ app.post('/admin/profile/:id/delete', requireAuth, (req, res) => {
     res.redirect('/admin?msg=Profile deleted successfully!');
 });
 
+// --- Proxy Init Route ---
+// When user clicks share link, set session cookie and redirect to target path
 app.get('/go/:id', (req, res) => {
     const profiles = getProfiles();
     const profile = profiles.find(p => p.id === req.params.id);
     if (!profile) return res.status(404).send('Proxy profile not found.');
     
+    // Set a cookie to remember this profile for all subsequent page navigation
     res.cookie('proxy_id', profile.id, { httpOnly: true, maxAge: 86400000 });
+    
+    // Redirect to the target URL's path on our own domain
     const targetUrl = new URL(profile.targetUrl);
     res.redirect(targetUrl.pathname + targetUrl.search);
 });
 
+// Route to stop the proxy session and return to admin
 app.get('/proxy-stop', (req, res) => {
     res.clearCookie('proxy_id');
     res.redirect('/admin');
 });
 
+
 // ==========================================
-// 2. DYNAMIC PROXY MIDDLEWARE (STEALTH MODE)
+// 2. DYNAMIC PROXY MIDDLEWARE (STEALTH MODE + RESIDENTIAL PROXY)
 // ==========================================
 const proxyMiddleware = createProxyMiddleware({
-    target: 'http://dummy-required-host.com',
+    target: 'http://dummy-required-host.com', // Fallback target
     router: (req) => {
         try {
             return new URL(req.targetProfile.targetUrl).origin;
         } catch(e) {
             console.error("Router Error:", e);
-            return 'http://localhost';
+            return 'http://localhost'; // Fallback to prevent crash
         }
     },
     changeOrigin: true,
@@ -172,6 +179,15 @@ const proxyMiddleware = createProxyMiddleware({
     selfHandleResponse: false,
     timeout: 30000, 
     proxyTimeout: 30000,
+    
+    // ==========================================
+    // THE ULTIMATE WAF BYPASS: RESIDENTIAL PROXY
+    // ==========================================
+    // To bypass strict "Unusual Activity" Cloudflare blocks, add a Residential Proxy URL 
+    // in your Render Environment Variables (Key: RESIDENTIAL_PROXY_URL).
+    // Format: http://username:password@gate.smartproxy.com:7000
+    // Leave it blank (false) if you don't have one.
+    proxy: process.env.RESIDENTIAL_PROXY_URL || false,
     
     onProxyReq: (proxyReq, req, res) => {
         if (!req.targetProfile) return;
@@ -211,9 +227,19 @@ const proxyMiddleware = createProxyMiddleware({
                 }
             });
 
-            // 5. FORWARD REAL BROWSER USER-AGENT & ACCEPT HEADERS
+            // 5. FORWARD REAL BROWSER HEADERS + UPGRADE-INSECURE-REQUESTS
             if (req.headers['user-agent']) proxyReq.setHeader('User-Agent', req.headers['user-agent']);
-            if (req.headers['accept']) proxyReq.setHeader('Accept', req.headers['accept']);
+            
+            if (req.headers['accept']) {
+                proxyReq.setHeader('Accept', req.headers['accept']);
+            } else {
+                // Fallback Accept header if browser doesn't provide one
+                proxyReq.setHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
+            }
+            
+            // This header tells the site we are a real browser requesting a secure page
+            proxyReq.setHeader('Upgrade-Insecure-Requests', '1');
+            
             if (req.headers['accept-language']) proxyReq.setHeader('Accept-Language', req.headers['accept-language']);
             if (req.headers['accept-encoding']) proxyReq.setHeader('Accept-Encoding', req.headers['accept-encoding']);
 
@@ -246,6 +272,7 @@ const proxyMiddleware = createProxyMiddleware({
 
     onError: (err, req, res) => {
         console.error('Proxy Network Error:', err.code, err.message);
+        // If headers aren't sent, we can send a custom error page
         if (!res.headersSent) {
             res.status(502).send(`
                 <h1>Proxy Connection Error (502)</h1>
@@ -257,29 +284,49 @@ const proxyMiddleware = createProxyMiddleware({
     }
 });
 
-// CONDITIONAL WRAPPER
+// ==========================================
+// 3. CONDITIONAL PROXY WRAPPER
+// ==========================================
+// This ensures the proxy ONLY runs if the user has a valid proxy session cookie!
 app.use((req, res, next) => {
+    // 1. If no proxy cookie is present, skip the proxy completely
     if (!req.cookies || !req.cookies.proxy_id) {
         return next();
     }
 
+    // 2. Find the profile associated with their cookie
     const profiles = getProfiles();
     const profile = profiles.find(p => p.id === req.cookies.proxy_id);
 
+    // 3. If profile was deleted or invalid, clear cookie and skip proxy
     if (!profile) {
         res.clearCookie('proxy_id');
         return res.redirect('/admin');
     }
 
+    // 4. Attach profile to req so the proxy can use it safely
     req.targetProfile = profile;
+
+    // 5. Execute the proxy middleware!
     return proxyMiddleware(req, res, next);
 });
 
+
 // ==========================================
-// 3. FALLBACK ROUTE
+// 4. FALLBACK ROUTE (Not in Proxy Mode)
 // ==========================================
+// If a user visits a random URL without a proxy cookie, redirect to admin
 app.use((req, res) => {
     res.redirect('/admin');
+});
+
+// --- Global Error Handler ---
+app.use((err, req, res, next) => {
+    console.error('Unhandled Error:', err);
+    res.status(500).send(`
+        <h1>Internal Server Error</h1>
+        <pre style="background: #f0f0f0; padding: 20px; border-radius: 5px; overflow-x: auto;">${err.stack}</pre>
+    `);
 });
 
 app.listen(PORT, () => {
