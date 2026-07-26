@@ -14,30 +14,24 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'profiles.json');
 
-// Safely ensure the data directory and file exist
 function ensureDataFileExists() {
     try {
-        if (!fs.existsSync(DATA_DIR)) {
-            fs.mkdirSync(DATA_DIR, { recursive: true });
-        }
-        if (!fs.existsSync(DATA_FILE)) {
-            fs.writeFileSync(DATA_FILE, '[]', 'utf8');
-        }
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+        if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '[]', 'utf8');
     } catch (err) {
         console.error("Failed to create data file:", err);
     }
 }
 
-// --- Helper Functions for Data ---
 function getProfiles() {
     try {
         ensureDataFileExists();
         const data = fs.readFileSync(DATA_FILE, 'utf8');
         const parsed = JSON.parse(data);
-        return Array.isArray(parsed) ? parsed : []; // Ensure it always returns an array
+        return Array.isArray(parsed) ? parsed : [];
     } catch (e) {
         console.error("Error reading profiles:", e);
-        return []; // Fallback to empty array on any error
+        return [];
     }
 }
 
@@ -92,8 +86,9 @@ function requireAuth(req, res, next) {
 // --- Admin Routes ---
 app.set('view engine', 'ejs');
 
-// Redirect root URL to the admin panel
 app.get('/', (req, res) => {
+    // If user is in a proxy session, redirect them to the target path
+    if (req.cookies.proxy_id) return res.redirect('/fx/dashboard'); 
     res.redirect('/admin');
 });
 
@@ -134,14 +129,7 @@ app.post('/admin/profile', requireAuth, (req, res) => {
     }
 
     const id = uuid.v4().substring(0, 8);
-    
-    profiles.push({
-        id,
-        name,
-        targetUrl,
-        cookies: parsedCookies
-    });
-    
+    profiles.push({ id, name, targetUrl, cookies: parsedCookies });
     saveProfiles(profiles);
     res.redirect('/admin?msg=Profile created successfully!');
 });
@@ -153,13 +141,42 @@ app.post('/admin/profile/:id/delete', requireAuth, (req, res) => {
     res.redirect('/admin?msg=Profile deleted successfully!');
 });
 
-// --- PROXY SYSTEM ---
-app.use('/go/:id', (req, res, next) => {
+// --- PROXY INITIALIZATION ROUTE ---
+// When user clicks the share link, we set a session cookie and redirect them
+app.get('/go/:id', (req, res) => {
     const profiles = getProfiles();
     const profile = profiles.find(p => p.id === req.params.id);
     
     if (!profile) return res.status(404).send('Proxy profile not found.');
     
+    // Set a cookie to remember this profile for subsequent requests
+    res.cookie('proxy_id', profile.id, { httpOnly: true, maxAge: 86400000 });
+    
+    // Redirect to the target URL's path on our own domain
+    const targetUrl = new URL(profile.targetUrl);
+    res.redirect(targetUrl.pathname);
+});
+
+// Route to stop the proxy session and return to admin
+app.get('/proxy-stop', (req, res) => {
+    res.clearCookie('proxy_id');
+    res.redirect('/admin');
+});
+
+
+// --- DYNAMIC CATCH-ALL PROXY SYSTEM ---
+// This intercepts ALL requests if the proxy_id cookie is set
+app.use((req, res, next) => {
+    if (!req.cookies.proxy_id) return next(); // Skip if not in proxy mode
+
+    const profiles = getProfiles();
+    const profile = profiles.find(p => p.id === req.cookies.proxy_id);
+
+    if (!profile) {
+        res.clearCookie('proxy_id');
+        return res.redirect('/admin');
+    }
+
     req.targetProfile = profile;
     next();
 }, createProxyMiddleware({
@@ -168,16 +185,12 @@ app.use('/go/:id', (req, res, next) => {
         const url = new URL(req.targetProfile.targetUrl);
         return url.origin;
     },
-    pathRewrite: (path, req) => {
-        const url = new URL(req.targetProfile.targetUrl);
-        const basePath = `/go/${req.targetProfile.id}`;
-        const remainingPath = path.startsWith(basePath) ? path.slice(basePath.length) : path;
-        return url.pathname === '/' ? remainingPath : url.pathname + remainingPath;
-    },
+    // NO pathRewrite! We proxy the exact path the browser is requesting.
     changeOrigin: true,
     secure: false,
     cookieDomainRewrite: { '*': '' },
     followRedirects: true,
+    selfHandleResponse: false, // Stream the response directly
     
     onProxyReq: (proxyReq, req, res) => {
         const profile = req.targetProfile;
@@ -209,7 +222,6 @@ app.use('/go/:id', (req, res, next) => {
 }));
 
 // --- Global Error Handler ---
-// This will catch any unhandled errors and show them in the browser
 app.use((err, req, res, next) => {
     console.error('Unhandled Error:', err);
     res.status(500).send(`
