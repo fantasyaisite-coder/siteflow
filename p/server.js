@@ -86,12 +86,6 @@ function requireAuth(req, res, next) {
 // --- Admin Routes ---
 app.set('view engine', 'ejs');
 
-app.get('/', (req, res) => {
-    // If user is in a proxy session, redirect them to the target path
-    if (req.cookies.proxy_id) return res.redirect('/fx/dashboard'); 
-    res.redirect('/admin');
-});
-
 app.get('/admin/login', (req, res) => {
     res.render('login', { error: null });
 });
@@ -141,7 +135,7 @@ app.post('/admin/profile/:id/delete', requireAuth, (req, res) => {
     res.redirect('/admin?msg=Profile deleted successfully!');
 });
 
-// --- PROXY INITIALIZATION ROUTE ---
+// --- Proxy Init Route ---
 // When user clicks the share link, we set a session cookie and redirect them
 app.get('/go/:id', (req, res) => {
     const profiles = getProfiles();
@@ -154,7 +148,7 @@ app.get('/go/:id', (req, res) => {
     
     // Redirect to the target URL's path on our own domain
     const targetUrl = new URL(profile.targetUrl);
-    res.redirect(targetUrl.pathname);
+    res.redirect(targetUrl.pathname + targetUrl.search);
 });
 
 // Route to stop the proxy session and return to admin
@@ -163,42 +157,44 @@ app.get('/proxy-stop', (req, res) => {
     res.redirect('/admin');
 });
 
+// --- Dynamic Catch-All Proxy System ---
+app.use(createProxyMiddleware({
+    target: 'http://dummy-required-host.com', // Fallback target
+    bypass: (req, res) => {
+        // If no proxy_id cookie, skip proxy and let the next route handle it
+        if (!req.cookies.proxy_id) return false;
 
-// --- DYNAMIC CATCH-ALL PROXY SYSTEM ---
-// This intercepts ALL requests if the proxy_id cookie is set
-app.use((req, res, next) => {
-    if (!req.cookies.proxy_id) return next(); // Skip if not in proxy mode
+        const profiles = getProfiles();
+        const profile = profiles.find(p => p.id === req.cookies.proxy_id);
 
-    const profiles = getProfiles();
-    const profile = profiles.find(p => p.id === req.cookies.proxy_id);
-
-    if (!profile) {
-        res.clearCookie('proxy_id');
-        return res.redirect('/admin');
-    }
-
-    req.targetProfile = profile;
-    next();
-}, createProxyMiddleware({
-    target: 'http://dummy-required-host.com',
-    router: (req) => {
-        const url = new URL(req.targetProfile.targetUrl);
-        return url.origin;
+        // If profile not found, clear cookie and skip proxy
+        if (!profile) {
+            res.clearCookie('proxy_id');
+            return false;
+        }
+        
+        // Attach profile to request for the proxy hooks to use
+        req.targetProfile = profile;
     },
-    // NO pathRewrite! We proxy the exact path the browser is requesting.
+    router: (req) => {
+        // bypass has already set req.targetProfile
+        return new URL(req.targetProfile.targetUrl).origin;
+    },
     changeOrigin: true,
     secure: false,
     cookieDomainRewrite: { '*': '' },
     followRedirects: true,
-    selfHandleResponse: false, // Stream the response directly
+    selfHandleResponse: false,
     
     onProxyReq: (proxyReq, req, res) => {
+        if (!req.targetProfile) return;
         const profile = req.targetProfile;
         const cookieHeader = profile.cookies.map(c => `${c.name}=${c.value}`).join('; ');
         proxyReq.setHeader('Cookie', cookieHeader);
     },
 
     onProxyRes: (proxyRes, req, res) => {
+        if (!req.targetProfile) return;
         const profile = req.targetProfile;
         const existingCookies = proxyRes.headers['set-cookie'] || [];
 
@@ -220,6 +216,12 @@ app.use((req, res, next) => {
         res.status(500).send('Proxy Error: Could not connect to the target website.');
     }
 }));
+
+// --- Catch-all for non-proxy requests ---
+// If a user visits a random URL without a proxy cookie, redirect to admin
+app.use((req, res) => {
+    res.redirect('/admin');
+});
 
 // --- Global Error Handler ---
 app.use((err, req, res, next) => {
