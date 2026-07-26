@@ -83,7 +83,9 @@ function requireAuth(req, res, next) {
     res.redirect('/admin/login');
 }
 
-// --- Admin Routes ---
+// ==========================================
+// 1. ADMIN & CONTROL ROUTES (Never Proxied)
+// ==========================================
 app.set('view engine', 'ejs');
 
 app.get('/admin/login', (req, res) => {
@@ -136,14 +138,14 @@ app.post('/admin/profile/:id/delete', requireAuth, (req, res) => {
 });
 
 // --- Proxy Init Route ---
-// When user clicks the share link, we set a session cookie and redirect them
+// When user clicks share link, set session cookie and redirect to target path
 app.get('/go/:id', (req, res) => {
     const profiles = getProfiles();
     const profile = profiles.find(p => p.id === req.params.id);
     
     if (!profile) return res.status(404).send('Proxy profile not found.');
     
-    // Set a cookie to remember this profile for subsequent requests
+    // Set cookie to remember this profile for all subsequent page navigation
     res.cookie('proxy_id', profile.id, { httpOnly: true, maxAge: 86400000 });
     
     // Redirect to the target URL's path on our own domain
@@ -158,35 +160,13 @@ app.get('/proxy-stop', (req, res) => {
 });
 
 
-// --- Dynamic Catch-All Proxy System ---
-app.use(createProxyMiddleware({
-    target: 'http://dummy-required-host.com', // Fallback target
-    bypass: (req, res) => {
-        // RULE 1: Never proxy any admin, auth, or control routes
-        if (req.path.startsWith('/admin') || req.path === '/proxy-stop' || req.path.startsWith('/go/')) {
-            return req.path; // Returning a path string BYPASSES the proxy
-        }
-
-        // RULE 2: If NO proxy cookie exists, bypass the proxy completely
-        if (!req.cookies || !req.cookies.proxy_id) {
-            return req.path; // Yes, bypass!
-        }
-
-        const profiles = getProfiles();
-        const profile = profiles.find(p => p.id === req.cookies.proxy_id);
-
-        // RULE 3: If cookie profile is invalid or deleted, clear it and bypass
-        if (!profile) {
-            res.clearCookie('proxy_id');
-            return req.path; // Yes, bypass!
-        }
-        
-        // If we passed all checks, DO NOT bypass. Proceed with proxying.
-        // We attach the profile to the request object so 'router' can access it safely.
-        req.targetProfile = profile;
-    },
+// ==========================================
+// 2. DYNAMIC PROXY MIDDLEWARE
+// ==========================================
+const proxyMiddleware = createProxyMiddleware({
+    target: 'http://dummy-required-host.com', // Fallback, overridden by router below
     router: (req) => {
-        // Because of our corrected bypass rules, req.targetProfile is GUARANTEED to exist here.
+        // Since our wrapper below guarantees req.targetProfile exists, this will NEVER fail!
         return new URL(req.targetProfile.targetUrl).origin;
     },
     changeOrigin: true,
@@ -196,14 +176,12 @@ app.use(createProxyMiddleware({
     selfHandleResponse: false,
     
     onProxyReq: (proxyReq, req, res) => {
-        if (!req.targetProfile) return;
         const profile = req.targetProfile;
         const cookieHeader = profile.cookies.map(c => `${c.name}=${c.value}`).join('; ');
         proxyReq.setHeader('Cookie', cookieHeader);
     },
 
     onProxyRes: (proxyRes, req, res) => {
-        if (!req.targetProfile) return;
         const profile = req.targetProfile;
         const existingCookies = proxyRes.headers['set-cookie'] || [];
 
@@ -224,11 +202,37 @@ app.use(createProxyMiddleware({
         console.error('Proxy Error:', err);
         res.status(500).send('Proxy Error: Could not connect to the target website.');
     }
-}));
+});
+
+// CONDITIONAL WRAPPER: This ensures the proxy ONLY runs if the user has a valid proxy session!
+app.use((req, res, next) => {
+    // 1. If no proxy cookie is present, skip the proxy completely
+    if (!req.cookies || !req.cookies.proxy_id) {
+        return next();
+    }
+
+    // 2. Find the profile associated with their cookie
+    const profiles = getProfiles();
+    const profile = profiles.find(p => p.id === req.cookies.proxy_id);
+
+    // 3. If profile was deleted or invalid, clear cookie and skip proxy
+    if (!profile) {
+        res.clearCookie('proxy_id');
+        return res.redirect('/admin');
+    }
+
+    // 4. Attach profile to req so the proxy can use it safely
+    req.targetProfile = profile;
+
+    // 5. Execute the proxy middleware!
+    return proxyMiddleware(req, res, next);
+});
 
 
-// --- Catch-all for non-proxy requests ---
-// If a user visits a route that was bypassed and didn't match any admin routes, send them to admin
+// ==========================================
+// 3. FALLBACK ROUTE (Not in Proxy Mode)
+// ==========================================
+// If a user gets here, it means they are NOT in proxy mode. Redirect to admin!
 app.use((req, res) => {
     res.redirect('/admin');
 });
