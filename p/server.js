@@ -10,33 +10,49 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-// --- JSON File Setup ---
-// Use Render's persistent disk path if available, otherwise use local dev path
-const dataDir = process.env.RENDER ? '/opt/render/project/data' : path.join(__dirname, 'data');
-const DATA_FILE = path.join(dataDir, 'profiles.json');
+// --- Safe JSON File Setup ---
+const DATA_DIR = path.join(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'profiles.json');
 
-// Ensure the data directory exists
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-}
-// Ensure the profiles.json file exists
-if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, '[]', 'utf8');
+// Safely ensure the data directory and file exist
+function ensureDataFileExists() {
+    try {
+        if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
+        if (!fs.existsSync(DATA_FILE)) {
+            fs.writeFileSync(DATA_FILE, '[]', 'utf8');
+        }
+    } catch (err) {
+        console.error("Failed to create data file:", err);
+    }
 }
 
 // --- Helper Functions for Data ---
 function getProfiles() {
     try {
+        ensureDataFileExists();
         const data = fs.readFileSync(DATA_FILE, 'utf8');
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        return Array.isArray(parsed) ? parsed : []; // Ensure it always returns an array
     } catch (e) {
-        return [];
+        console.error("Error reading profiles:", e);
+        return []; // Fallback to empty array on any error
     }
 }
 
 function saveProfiles(profiles) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(profiles, null, 2));
+    try {
+        ensureDataFileExists();
+        fs.writeFileSync(DATA_FILE, JSON.stringify(profiles, null, 2));
+    } catch (e) {
+        console.error("Error saving profiles:", e);
+    }
 }
+
+// --- Middleware ---
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 // --- Helper Functions ---
 function parseCookies(cookieString, format) {
@@ -191,6 +207,16 @@ app.use('/go/:id', (req, res, next) => {
         res.status(500).send('Proxy Error: Could not connect to the target website.');
     }
 }));
+
+// --- Global Error Handler ---
+// This will catch any unhandled errors and show them in the browser
+app.use((err, req, res, next) => {
+    console.error('Unhandled Error:', err);
+    res.status(500).send(`
+        <h1>Internal Server Error</h1>
+        <pre style="background: #f0f0f0; padding: 20px; border-radius: 5px; overflow-x: auto;">${err.stack}</pre>
+    `);
+});
 
 app.listen(PORT, () => {
     console.log(`🚀 Cookie Proxy Tool running on port ${PORT}`);
