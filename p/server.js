@@ -76,6 +76,11 @@ function requireAuth(req, res, next) {
 // --- Admin Routes ---
 app.set('view engine', 'ejs');
 
+// Redirect root URL to the admin panel
+app.get('/', (req, res) => {
+    res.redirect('/admin');
+});
+
 app.get('/admin/login', (req, res) => {
     res.render('login', { error: null });
 });
