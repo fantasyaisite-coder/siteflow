@@ -1,0 +1,61 @@
+/* Custom styles for Cookie Injection Proxy */
+body {
+    background-color: #f8fafc;
+}
+
+.card {
+    transition: box-shadow 0.3s ease;
+}
+.card:hover {
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+}
+
+.copy-btn {
+    cursor: pointer;
+}
+.copy-btn:active {
+    transform: scale(0.95);
+}
+
+.cookie-paste-area {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    min-height: 120px;
+}
+
+.badge-secure {
+    background-color: #dbeafe;
+    color: #1e40af;
+}
+.badge-host {
+    background-color: #dcfce7;
+    color: #166534;
+}
+
+.toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 9999;
+    animation: slideIn 0.3s ease, fadeOut 0.3s ease 3s forwards;
+}
+@keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+@keyframes fadeOut {
+    to { opacity: 0; transform: translateY(-10px); }
+}
+
+.spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid #e5e7eb;
+    border-top-color: #6366f1;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
