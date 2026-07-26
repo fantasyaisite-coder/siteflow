@@ -1,31 +1,42 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const cookieParser = require('cookie-parser');
+const fs = require('fs');
 const path = require('path');
 const uuid = require('uuid');
 const { URL } = require('url');
-const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-// --- SQLite Database Setup ---
-const dbPath = process.env.RENDER ? '/opt/render/project/data/proxy_data.db' : path.join(__dirname, 'proxy_data.db');
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS profiles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    targetUrl TEXT NOT NULL,
-    cookies TEXT NOT NULL
-  )
-`);
+// --- JSON File Setup ---
+// Use Render's persistent disk path if available, otherwise use local dev path
+const dataDir = process.env.RENDER ? '/opt/render/project/data' : path.join(__dirname, 'data');
+const DATA_FILE = path.join(dataDir, 'profiles.json');
 
-// --- Middleware ---
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
+// Ensure the data directory exists
+if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+}
+// Ensure the profiles.json file exists
+if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, '[]', 'utf8');
+}
+
+// --- Helper Functions for Data ---
+function getProfiles() {
+    try {
+        const data = fs.readFileSync(DATA_FILE, 'utf8');
+        return JSON.parse(data);
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveProfiles(profiles) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(profiles, null, 2));
+}
 
 // --- Helper Functions ---
 function parseCookies(cookieString, format) {
@@ -84,15 +95,13 @@ app.get('/admin/logout', (req, res) => {
 });
 
 app.get('/admin', requireAuth, (req, res) => {
-    const profiles = db.prepare('SELECT * FROM profiles').all().map(p => ({
-        ...p,
-        cookies: JSON.parse(p.cookies)
-    }));
+    const profiles = getProfiles();
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.render('dashboard', { profiles, baseUrl, msg: req.query.msg, error: req.query.error });
 });
 
 app.post('/admin/profile', requireAuth, (req, res) => {
+    const profiles = getProfiles();
     const { name, targetUrl, cookies, cookieFormat } = req.body;
     const parsedCookies = parseCookies(cookies, cookieFormat);
     
@@ -105,26 +114,32 @@ app.post('/admin/profile', requireAuth, (req, res) => {
 
     const id = uuid.v4().substring(0, 8);
     
-    db.prepare('INSERT INTO profiles (id, name, targetUrl, cookies) VALUES (?, ?, ?, ?)')
-      .run(id, name, targetUrl, JSON.stringify(parsedCookies));
-      
+    profiles.push({
+        id,
+        name,
+        targetUrl,
+        cookies: parsedCookies
+    });
+    
+    saveProfiles(profiles);
     res.redirect('/admin?msg=Profile created successfully!');
 });
 
 app.post('/admin/profile/:id/delete', requireAuth, (req, res) => {
-    db.prepare('DELETE FROM profiles WHERE id = ?').run(req.params.id);
+    let profiles = getProfiles();
+    profiles = profiles.filter(p => p.id !== req.params.id);
+    saveProfiles(profiles);
     res.redirect('/admin?msg=Profile deleted successfully!');
 });
 
 // --- PROXY SYSTEM ---
 app.use('/go/:id', (req, res, next) => {
-    const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+    const profiles = getProfiles();
+    const profile = profiles.find(p => p.id === req.params.id);
+    
     if (!profile) return res.status(404).send('Proxy profile not found.');
     
-    req.targetProfile = {
-        ...profile,
-        cookies: JSON.parse(profile.cookies)
-    };
+    req.targetProfile = profile;
     next();
 }, createProxyMiddleware({
     target: 'http://dummy-required-host.com',
