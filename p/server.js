@@ -153,7 +153,7 @@ app.get('/proxy-stop', (req, res) => {
 });
 
 // ==========================================
-// 2. DYNAMIC PROXY MIDDLEWARE
+// 2. DYNAMIC PROXY MIDDLEWARE (STEALTH MODE)
 // ==========================================
 const proxyMiddleware = createProxyMiddleware({
     target: 'http://dummy-required-host.com',
@@ -162,7 +162,7 @@ const proxyMiddleware = createProxyMiddleware({
             return new URL(req.targetProfile.targetUrl).origin;
         } catch(e) {
             console.error("Router Error:", e);
-            return 'http://localhost'; // Fallback to prevent crash
+            return 'http://localhost';
         }
     },
     changeOrigin: true,
@@ -170,8 +170,6 @@ const proxyMiddleware = createProxyMiddleware({
     cookieDomainRewrite: { '*': '' },
     followRedirects: true,
     selfHandleResponse: false,
-    
-    // Add timeouts to prevent Render 502s on slow pages
     timeout: 30000, 
     proxyTimeout: 30000,
     
@@ -179,31 +177,48 @@ const proxyMiddleware = createProxyMiddleware({
         if (!req.targetProfile) return;
         try {
             const profile = req.targetProfile;
+            const targetOrigin = new URL(profile.targetUrl).origin;
+
+            // ==========================================
+            // STEALTH INJECTION: Look exactly like a real browser
+            // ==========================================
+
+            // 1. REMOVE ALL PROXY HEADERS (WAFs check these to block bots instantly!)
+            proxyReq.removeHeader('X-Forwarded-For');
+            proxyReq.removeHeader('X-Forwarded-Host');
+            proxyReq.removeHeader('X-Forwarded-Proto');
+            proxyReq.removeHeader('X-Real-Ip');
+
+            // 2. SPOOF ORIGIN & REFERER (Must match the target site perfectly)
+            proxyReq.setHeader('Origin', targetOrigin);
+            proxyReq.setHeader('Referer', targetOrigin + req.path);
+
+            // 3. INJECT COOKIES
             const cookieHeader = profile.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             proxyReq.setHeader('Cookie', cookieHeader);
             
-            // CRITICAL: Forward real browser headers so the target site doesn't block us
-            if (req.headers['user-agent']) {
-                proxyReq.setHeader('User-Agent', req.headers['user-agent']);
-            }
-            if (req.headers['accept']) {
-                proxyReq.setHeader('Accept', req.headers['accept']);
-            }
-            if (req.headers['accept-language']) {
-                proxyReq.setHeader('Accept-Language', req.headers['accept-language']);
-            }
-            if (req.headers['referer']) {
-                // Rewrite the referer to match the target site
-                try {
-                    const refererUrl = new URL(req.headers['referer']);
-                    const targetOrigin = new URL(profile.targetUrl).origin;
-                    proxyReq.setHeader('Referer', targetOrigin + refererUrl.pathname + refererUrl.search);
-                } catch (e) {
-                    // Ignore invalid referer
+            // 4. FORWARD MODERN BROWSER SEC- HEADERS (Crucial for Next.js/Cloudflare)
+            const secHeaders = [
+                'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
+                'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'
+            ];
+            
+            secHeaders.forEach(h => {
+                if (req.headers[h]) {
+                    proxyReq.setHeader(h, req.headers[h]);
+                } else {
+                    proxyReq.removeHeader(h); // Don't send empty sec headers
                 }
-            }
+            });
+
+            // 5. FORWARD REAL BROWSER USER-AGENT & ACCEPT HEADERS
+            if (req.headers['user-agent']) proxyReq.setHeader('User-Agent', req.headers['user-agent']);
+            if (req.headers['accept']) proxyReq.setHeader('Accept', req.headers['accept']);
+            if (req.headers['accept-language']) proxyReq.setHeader('Accept-Language', req.headers['accept-language']);
+            if (req.headers['accept-encoding']) proxyReq.setHeader('Accept-Encoding', req.headers['accept-encoding']);
+
         } catch(e) {
-            console.error("Error in onProxyReq:", e);
+            console.error("Error in onProxyReq Stealth Setup:", e);
         }
     },
 
@@ -231,7 +246,6 @@ const proxyMiddleware = createProxyMiddleware({
 
     onError: (err, req, res) => {
         console.error('Proxy Network Error:', err.code, err.message);
-        // If headers aren't sent, we can send a custom error page
         if (!res.headersSent) {
             res.status(502).send(`
                 <h1>Proxy Connection Error (502)</h1>
