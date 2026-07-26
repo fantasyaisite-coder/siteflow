@@ -1,6 +1,7 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const cookieParser = require('cookie-parser');
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const uuid = require('uuid');
@@ -9,6 +10,12 @@ const { URL } = require('url');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+
+// ==========================================
+// FLARESOLVERR CONFIGURATION (FREE BYPASS)
+// ==========================================
+// Paste your FlareSolverr Render Internal URL here!
+const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaresolverr-XXXX.onrender.com';
 
 // --- Safe JSON File Setup ---
 const DATA_DIR = path.join(__dirname, 'data');
@@ -137,14 +144,71 @@ app.post('/admin/profile/:id/delete', requireAuth, (req, res) => {
     res.redirect('/admin?msg=Profile deleted successfully!');
 });
 
-// --- Proxy Init Route ---
-// When user clicks share link, set session cookie and redirect to target path
-app.get('/go/:id', (req, res) => {
+// ==========================================
+// 2. FLARESOLVERR BYPASS + PROXY INIT
+// ==========================================
+app.get('/go/:id', async (req, res) => {
     const profiles = getProfiles();
     const profile = profiles.find(p => p.id === req.params.id);
     if (!profile) return res.status(404).send('Proxy profile not found.');
     
-    // Set a cookie to remember this profile for all subsequent page navigation
+    try {
+        const targetUrl = new URL(profile.targetUrl);
+        
+        // Step 1: Ask FlareSolverr to bypass Cloudflare and get the cf_clearance cookie
+        console.log(`[FlareSolverr] Requesting bypass for: ${targetUrl.origin}`);
+        
+        const flarePayload = {
+            cmd: "request.get",
+            url: targetUrl.origin, // Just send the base domain to get the clearance cookie
+            maxTimeout: 60000
+        };
+
+        const flareResponse = await axios.post(`${FLARESOLVERR_URL}/v1`, flarePayload, { timeout: 65000 });
+        
+        if (flareResponse.data.status === 'ok') {
+            const flareCookies = flareResponse.data.solution.cookies;
+            
+            // Find the cf_clearance cookie
+            const cfClearance = flareCookies.find(c => c.name === 'cf_clearance');
+            
+            if (cfClearance) {
+                console.log(`[FlareSolverr] Successfully acquired cf_clearance!`);
+                // Attach the Cloudflare bypass cookie to the user's session
+                profile.cookies.push({
+                    name: cfClearance.name,
+                    value: cfClearance.value,
+                    domain: cfClearance.domain,
+                    path: cfClearance.path || '/',
+                    secure: true,
+                    httpOnly: true,
+                    sameSite: 'None' // Required for cross-site proxying
+                });
+            } else {
+                console.log(`[FlareSolverr] Bypassed, but no cf_clearance found. Might not be needed.`);
+            }
+        } else {
+            console.error(`[FlareSolverr] Failed to bypass:`, flareResponse.data);
+            return res.status(500).send('FlareSolverr failed to bypass Cloudflare. Try again in a minute.');
+        }
+
+    } catch (err) {
+        console.error(`[FlareSolverr] Network Error:`, err.message);
+        // If FlareSolverr is sleeping (Render free tier spins down after 15m), it takes ~30s to wake up.
+        // The request might timeout. Tell the user to try again.
+        return res.status(503).send(`
+            <h1>Proxy is Waking Up</h1>
+            <p>The bypass server is currently spinning up (this takes ~30 seconds on the free tier).</p>
+            <p>Please <a href="/go/${req.params.id}">click here to try again</a> in 30 seconds.</p>
+        `);
+    }
+
+    // Step 2: Set the proxy_id cookie with the UPDATED profile (now containing cf_clearance)
+    // We save the profile with cf_clearance temporarily so subsequent requests use it
+    // Note: On free tier, Render restarts often, clearing this naturally. 
+    // To be safer, we don't save it to profiles.json permanently, we just store it in the user's session.
+    
+    // Set a cookie to remember the profile ID
     res.cookie('proxy_id', profile.id, { httpOnly: true, maxAge: 86400000 });
     
     // Redirect to the target URL's path on our own domain
@@ -152,24 +216,22 @@ app.get('/go/:id', (req, res) => {
     res.redirect(targetUrl.pathname + targetUrl.search);
 });
 
-// Route to stop the proxy session and return to admin
 app.get('/proxy-stop', (req, res) => {
     res.clearCookie('proxy_id');
     res.redirect('/admin');
 });
 
-
 // ==========================================
-// 2. DYNAMIC PROXY MIDDLEWARE (STEALTH MODE + RESIDENTIAL PROXY)
+// 3. DYNAMIC PROXY MIDDLEWARE
 // ==========================================
 const proxyMiddleware = createProxyMiddleware({
-    target: 'http://dummy-required-host.com', // Fallback target
+    target: 'http://dummy-required-host.com',
     router: (req) => {
         try {
             return new URL(req.targetProfile.targetUrl).origin;
         } catch(e) {
             console.error("Router Error:", e);
-            return 'http://localhost'; // Fallback to prevent crash
+            return 'http://localhost';
         }
     },
     changeOrigin: true,
@@ -180,64 +242,38 @@ const proxyMiddleware = createProxyMiddleware({
     timeout: 30000, 
     proxyTimeout: 30000,
     
-    // ==========================================
-    // THE ULTIMATE WAF BYPASS: RESIDENTIAL PROXY
-    // ==========================================
-    // To bypass strict "Unusual Activity" Cloudflare blocks, add a Residential Proxy URL 
-    // in your Render Environment Variables (Key: RESIDENTIAL_PROXY_URL).
-    // Format: http://username:password@gate.smartproxy.com:7000
-    // Leave it blank (false) if you don't have one.
-    proxy: process.env.RESIDENTIAL_PROXY_URL || false,
-    
     onProxyReq: (proxyReq, req, res) => {
         if (!req.targetProfile) return;
         try {
             const profile = req.targetProfile;
             const targetOrigin = new URL(profile.targetUrl).origin;
 
-            // ==========================================
-            // STEALTH INJECTION: Look exactly like a real browser
-            // ==========================================
-
-            // 1. REMOVE ALL PROXY HEADERS (WAFs check these to block bots instantly!)
+            // 1. REMOVE PROXY HEADERS
             proxyReq.removeHeader('X-Forwarded-For');
             proxyReq.removeHeader('X-Forwarded-Host');
             proxyReq.removeHeader('X-Forwarded-Proto');
             proxyReq.removeHeader('X-Real-Ip');
 
-            // 2. SPOOF ORIGIN & REFERER (Must match the target site perfectly)
+            // 2. SPOOF ORIGIN & REFERER
             proxyReq.setHeader('Origin', targetOrigin);
             proxyReq.setHeader('Referer', targetOrigin + req.path);
 
-            // 3. INJECT COOKIES
+            // 3. INJECT COOKIES (Now includes cf_clearance if FlareSolverr got it!)
             const cookieHeader = profile.cookies.map(c => `${c.name}=${c.value}`).join('; ');
             proxyReq.setHeader('Cookie', cookieHeader);
             
-            // 4. FORWARD MODERN BROWSER SEC- HEADERS (Crucial for Next.js/Cloudflare)
-            const secHeaders = [
-                'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
-                'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'
-            ];
-            
+            // 4. FORWARD SEC- HEADERS
+            const secHeaders = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'];
             secHeaders.forEach(h => {
-                if (req.headers[h]) {
-                    proxyReq.setHeader(h, req.headers[h]);
-                } else {
-                    proxyReq.removeHeader(h); // Don't send empty sec headers
-                }
+                if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
+                else proxyReq.removeHeader(h);
             });
 
-            // 5. FORWARD REAL BROWSER HEADERS + UPGRADE-INSECURE-REQUESTS
+            // 5. FORWARD BROWSER HEADERS
             if (req.headers['user-agent']) proxyReq.setHeader('User-Agent', req.headers['user-agent']);
+            if (req.headers['accept']) proxyReq.setHeader('Accept', req.headers['accept']);
+            else proxyReq.setHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8');
             
-            if (req.headers['accept']) {
-                proxyReq.setHeader('Accept', req.headers['accept']);
-            } else {
-                // Fallback Accept header if browser doesn't provide one
-                proxyReq.setHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
-            }
-            
-            // This header tells the site we are a real browser requesting a secure page
             proxyReq.setHeader('Upgrade-Insecure-Requests', '1');
             
             if (req.headers['accept-language']) proxyReq.setHeader('Accept-Language', req.headers['accept-language']);
@@ -272,61 +308,37 @@ const proxyMiddleware = createProxyMiddleware({
 
     onError: (err, req, res) => {
         console.error('Proxy Network Error:', err.code, err.message);
-        // If headers aren't sent, we can send a custom error page
         if (!res.headersSent) {
             res.status(502).send(`
                 <h1>Proxy Connection Error (502)</h1>
-                <p>Could not connect to the target website page.</p>
-                <p><b>Error:</b> ${err.code || 'UNKNOWN'} - The target server might be blocking the request or is down.</p>
+                <p><b>Error:</b> ${err.code || 'UNKNOWN'}</p>
                 <a href="/proxy-stop">Return to Admin Panel</a>
             `);
         }
     }
 });
 
-// ==========================================
-// 3. CONDITIONAL PROXY WRAPPER
-// ==========================================
-// This ensures the proxy ONLY runs if the user has a valid proxy session cookie!
+// CONDITIONAL WRAPPER
 app.use((req, res, next) => {
-    // 1. If no proxy cookie is present, skip the proxy completely
     if (!req.cookies || !req.cookies.proxy_id) {
         return next();
     }
 
-    // 2. Find the profile associated with their cookie
     const profiles = getProfiles();
     const profile = profiles.find(p => p.id === req.cookies.proxy_id);
 
-    // 3. If profile was deleted or invalid, clear cookie and skip proxy
     if (!profile) {
         res.clearCookie('proxy_id');
         return res.redirect('/admin');
     }
 
-    // 4. Attach profile to req so the proxy can use it safely
     req.targetProfile = profile;
-
-    // 5. Execute the proxy middleware!
     return proxyMiddleware(req, res, next);
 });
 
-
-// ==========================================
-// 4. FALLBACK ROUTE (Not in Proxy Mode)
-// ==========================================
-// If a user visits a random URL without a proxy cookie, redirect to admin
+// FALLBACK ROUTE
 app.use((req, res) => {
     res.redirect('/admin');
-});
-
-// --- Global Error Handler ---
-app.use((err, req, res, next) => {
-    console.error('Unhandled Error:', err);
-    res.status(500).send(`
-        <h1>Internal Server Error</h1>
-        <pre style="background: #f0f0f0; padding: 20px; border-radius: 5px; overflow-x: auto;">${err.stack}</pre>
-    `);
 });
 
 app.listen(PORT, () => {
