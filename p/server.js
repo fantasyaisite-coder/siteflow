@@ -157,27 +157,36 @@ app.get('/proxy-stop', (req, res) => {
     res.redirect('/admin');
 });
 
+
 // --- Dynamic Catch-All Proxy System ---
 app.use(createProxyMiddleware({
     target: 'http://dummy-required-host.com', // Fallback target
     bypass: (req, res) => {
-        // If no proxy_id cookie, skip proxy and let the next route handle it
-        if (!req.cookies.proxy_id) return false;
+        // RULE 1: Never proxy any admin, auth, or control routes
+        if (req.path.startsWith('/admin') || req.path === '/proxy-stop' || req.path.startsWith('/go/')) {
+            return req.path; // Returning a path string BYPASSES the proxy
+        }
+
+        // RULE 2: If NO proxy cookie exists, bypass the proxy completely
+        if (!req.cookies || !req.cookies.proxy_id) {
+            return req.path; // Yes, bypass!
+        }
 
         const profiles = getProfiles();
         const profile = profiles.find(p => p.id === req.cookies.proxy_id);
 
-        // If profile not found, clear cookie and skip proxy
+        // RULE 3: If cookie profile is invalid or deleted, clear it and bypass
         if (!profile) {
             res.clearCookie('proxy_id');
-            return false;
+            return req.path; // Yes, bypass!
         }
         
-        // Attach profile to request for the proxy hooks to use
+        // If we passed all checks, DO NOT bypass. Proceed with proxying.
+        // We attach the profile to the request object so 'router' can access it safely.
         req.targetProfile = profile;
     },
     router: (req) => {
-        // bypass has already set req.targetProfile
+        // Because of our corrected bypass rules, req.targetProfile is GUARANTEED to exist here.
         return new URL(req.targetProfile.targetUrl).origin;
     },
     changeOrigin: true,
@@ -217,8 +226,9 @@ app.use(createProxyMiddleware({
     }
 }));
 
+
 // --- Catch-all for non-proxy requests ---
-// If a user visits a random URL without a proxy cookie, redirect to admin
+// If a user visits a route that was bypassed and didn't match any admin routes, send them to admin
 app.use((req, res) => {
     res.redirect('/admin');
 });
